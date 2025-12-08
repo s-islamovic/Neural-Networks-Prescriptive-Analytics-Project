@@ -1,84 +1,129 @@
-import numpy as np
 import random
-import tensorflow as tf
-from tensorflow.keras import models, layers
+import numpy as np
+from baseline_model import build_model
+from tensorflow.keras.callbacks import EarlyStopping
 
-X_train = np.load("data/processed/X_train.npy")
-X_val = np.load("data/processed/X_val.npy")
-y_train = np.load("data/processed/y_train.npy")
-y_val = np.load("data/processed/y_val.npy")
+# Genetic Algorithm class for hyperparameter optimization of a neural network
+class GeneticAlgorithm:
+    def __init__(self, X_train, y_train, population_size=6, generations=4):
+        """
+        Initialize the Genetic Algorithm.
+        
+        Parameters:
+        - X_train, y_train: training data
+        - population_size: number of individuals in each generation
+        - generations: number of generations to evolve
+        """
+        self.X_train = X_train
+        self.y_train = y_train
+        self.population_size = population_size
+        self.generations = generations
 
-param_space = {
-    "lr": [0.0005, 0.001, 0.005],
-    "h1": [16, 32, 64],
-    "h2": [8, 16, 32],
-    "dropout": [0.2, 0.3, 0.4],
-    "batch_size": [512, 1024, 2048]
-}
+        # Define possible hyperparameter choices for the neural network
+        self.param_choices = {
+            "lr": [0.0005, 0.001, 0.005],           # Learning rate options
+            "dropout_rate": [0.1, 0.2, 0.3],       # Dropout rates for regularization
+            "hidden_units": [16, 32, 64],          # Number of units in hidden layer
+            "batch_size": [128, 256],              # Batch size during training
+            "epochs": [5]                           # Number of epochs to train
+        }
 
-def build_model(params):
-    model = models.Sequential([
-        layers.Input(shape=(30,)),
-        layers.Dense(params["h1"], activation="relu"),
-        layers.Dropout(params["dropout"]),
-        layers.Dense(params["h2"], activation="relu"),
-        layers.Dense(1, activation="sigmoid")
-    ])
+    # Generate a random individual (set of hyperparameters)
+    def random_individual(self):
+        return {
+            "lr": random.choice(self.param_choices["lr"]),
+            "dropout_rate": random.choice(self.param_choices["dropout_rate"]),
+            "hidden_units": random.choice(self.param_choices["hidden_units"]),
+            "batch_size": random.choice(self.param_choices["batch_size"]),
+            "epochs": random.choice(self.param_choices["epochs"])
+        }
 
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=params["lr"]),
-        loss="binary_crossentropy",
-        metrics=[tf.keras.metrics.AUC()]
-    )
+    # Evaluate the fitness of an individual (hyperparameters)
+    def fitness(self, params):
+        """
+        Fitness function: trains the model with given hyperparameters
+        and returns the validation accuracy of the last epoch.
+        """
+        # Build the neural network model with given hyperparameters
+        model = build_model(
+            input_dim=self.X_train.shape[1],
+            lr=params["lr"],
+            dropout_rate=params["dropout_rate"],
+            hidden_units=params["hidden_units"]
+        )
 
-    return model
+        # Train the model
+        history = model.fit(
+            self.X_train, self.y_train,
+            batch_size=params["batch_size"],
+            epochs=params["epochs"],
+            validation_split=0.2,    # Use 20% of training data for validation
+            verbose=0,               # Suppress training output
+            callbacks=[EarlyStopping(patience=2)]  # Stop early if no improvement
+        )
 
-def evaluate_params(params):
-    model = build_model(params)
-    history = model.fit(
-        X_train, y_train,
-        epochs=3,
-        batch_size=params["batch_size"],
-        validation_data=(X_val, y_val),
-        verbose=0
-    )
-    return history.history["val_auc"][-1]
+        # Return validation accuracy of the last epoch as fitness score
+        return history.history["val_accuracy"][-1]
 
-def random_candidate():
-    return {key: random.choice(values) for key, values in param_space.items()}
+    # Mutate an individual by randomly changing one hyperparameter
+    def mutate(self, individual):
+        """
+        Randomly changes one hyperparameter in the individual.
+        Mutation introduces diversity in the population.
+        """
+        key = random.choice(list(self.param_choices.keys()))
+        individual[key] = random.choice(self.param_choices[key])
+        return individual
 
-def mutate(params):
-    key = random.choice(list(param_space.keys()))
-    params[key] = random.choice(param_space[key])
-    return params
+    # Crossover between two parent individuals to create a child
+    def crossover(self, parent1, parent2):
+        """
+        Combines hyperparameters from two parents.
+        Each hyperparameter is randomly selected from either parent.
+        """
+        child = {}
+        for key in parent1:
+            child[key] = parent1[key] if random.random() > 0.5 else parent2[key]
+        return child
 
-def crossover(a, b):
-    child = {}
-    for key in a.keys():
-        child[key] = random.choice([a[key], b[key]])
-    return child
+    # Main GA loop: evolve the population over generations
+    def evolve(self):
+        """
+        Run the genetic algorithm to find the best hyperparameters.
+        Returns the best parameter set found.
+        """
+        # Step 1: Initialize population with random individuals
+        population = [self.random_individual() for _ in range(self.population_size)]
 
-def genetic_algorithm(generations=5, population_size=6):
-    population = [random_candidate() for _ in range(population_size)]
+        # Step 2: Evolve over multiple generations
+        for gen in range(self.generations):
+            print(f"\n--- Generation {gen+1} ---")
 
-    for gen in range(generations):
-        print(f"\nGeneration {gen+1}/{generations}")
+            # Evaluate fitness for all individuals in the population
+            scores = [(params, self.fitness(params)) for params in population]
+            
+            # Sort individuals by fitness in descending order (higher is better)
+            scores.sort(key=lambda x: x[1], reverse=True)
 
-        scores = [(evaluate_params(ind), ind) for ind in population]
-        scores.sort(reverse=True, key=lambda x: x[0])
+            # Keep the top 2 individuals as "best"
+            best = scores[:2]
+            print("Best so far:", best)
 
-        population = [x[1] for x in scores[:2]]
+            # Step 3: Create next generation
+            next_gen = [s[0] for s in best]  # Start with best two
 
-        while len(population) < population_size:
-            parent1, parent2 = random.sample(scores[:3], 2)
-            child = crossover(parent1[1], parent2[1])
-            if random.random() < 0.3:
-                child = mutate(child)
-            population.append(child)
+            # Fill the rest of the population using crossover and mutation
+            while len(next_gen) < self.population_size:
+                parent1, parent2 = random.sample(best, 2)   # Randomly select two parents
+                child = self.crossover(parent1[0], parent2[0])  # Create child
+                if random.random() < 0.3:                     # 30% chance of mutation
+                    child = self.mutate(child)
+                next_gen.append(child)
 
-    best_params = scores[0]
-    print("\nBest GA Params:", best_params)
-    return best_params
+            # Update population for next generation
+            population = next_gen
 
-if __name__ == "__main__":
-    genetic_algorithm()
+        # Step 4: Return the best hyperparameters found
+        best_params = best[0][0]
+        print("\nBest Parameters:", best_params)
+        return best_params
